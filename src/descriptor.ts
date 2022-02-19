@@ -548,7 +548,7 @@ function createMessageSignature(
               fieldType,
             ),
             fieldDescriptor.options?.deprecated &&
-              fieldDescriptor == currentFieldDescriptor,
+            fieldDescriptor == currentFieldDescriptor,
           ),
         );
       }
@@ -852,6 +852,7 @@ function createConstructor(
  */
 function createGetter(
   rootDescriptor: descriptor.FileDescriptorProto,
+  messageDescriptor: descriptor.DescriptorProto,
   fieldDescriptor: descriptor.FieldDescriptorProto,
   pbIdentifier: ts.Identifier,
 ): ts.GetAccessorDeclaration {
@@ -861,6 +862,7 @@ function createGetter(
   );
   let getterExpr: ts.Expression = createGetterCall(
     rootDescriptor,
+    messageDescriptor,
     fieldDescriptor,
     pbIdentifier,
   );
@@ -894,11 +896,12 @@ function createGetter(
 
 function createGetterCall(
   rootDescriptor: descriptor.FileDescriptorProto,
+  messageDescriptor: descriptor.DescriptorProto,
   fieldDescriptor: descriptor.FieldDescriptorProto,
   pbIdentifier: ts.Identifier,
 ): ts.CallExpression {
   let args: ts.Expression[];
-  let getterMethod = "getField";
+  let getterMethod = "getFieldWithDefault";
 
   if (field.isMessage(fieldDescriptor) && !field.isMap(fieldDescriptor)) {
     getterMethod = field.isRepeated(fieldDescriptor)
@@ -916,27 +919,51 @@ function createGetterCall(
       ts.factory.createNumericLiteral(fieldDescriptor.number),
     ];
 
-    if (fieldDescriptor.default_value) {
-      getterMethod = "getFieldWithDefault";
-      let _default: ts.Expression;
+    let _default: ts.Expression;
 
-      if (field.isEnum(fieldDescriptor)) {
-        _default = ts.factory.createPropertyAccessExpression(
-          type.getTypeReferenceExpr(rootDescriptor, fieldDescriptor.type_name),
-          fieldDescriptor.default_value,
-        );
-      } else if (field.isString(fieldDescriptor)) {
-        _default = ts.factory.createStringLiteral(
-          fieldDescriptor.default_value,
-        );
-      } else if (field.isBoolean(fieldDescriptor)) {
-        _default = ts.factory.createIdentifier(fieldDescriptor.default_value);
-      } else {
+    if (field.isEnum(fieldDescriptor)) {
+      let enumName = fieldDescriptor.type_name.substring(fieldDescriptor.type_name.lastIndexOf('.') + 1);
+      let enumDescriptor = messageDescriptor.enum_type.find((value) => value.name == enumName);
+      let firstElement = enumDescriptor != null ? enumDescriptor.value.reduce((prev, curr) => prev.number < curr.number ? prev : curr) : undefined;
+
+      _default = ts.factory.createPropertyAccessExpression(
+        type.getTypeReferenceExpr(rootDescriptor, fieldDescriptor.type_name),
+        fieldDescriptor.default_value != null
+          ? fieldDescriptor.default_value
+          : firstElement.name
+      );
+    }
+    else if (field.isRepeated(fieldDescriptor)) {
+      _default = ts.factory.createIdentifier(
+        fieldDescriptor.default_value != null ? fieldDescriptor.default_value : "[]",
+      );
+    } else if (fieldDescriptor.type == descriptor.FieldDescriptorProto.Type.TYPE_BYTES) {
+      if (fieldDescriptor.default_value != null) {
         _default = ts.factory.createIdentifier(fieldDescriptor.default_value);
       }
-
-      args.push(_default);
+      else {
+        _default = ts.factory.createNewExpression(
+          ts.factory.createIdentifier("Uint8Array"),
+          undefined,
+          []
+        );
+      }
+    } else if (field.isString(fieldDescriptor)) {
+      _default = ts.factory.createStringLiteral(
+        fieldDescriptor.default_value != null ? fieldDescriptor.default_value : "",
+      );
+    } else if (field.isBoolean(fieldDescriptor)) {
+      _default = ts.factory.createIdentifier(
+        fieldDescriptor.default_value != null ? fieldDescriptor.default_value : "false",
+      );
     }
+    else {
+      _default = ts.factory.createIdentifier(
+        fieldDescriptor.default_value != null ? fieldDescriptor.default_value : "0",
+      );
+    }
+
+    args.push(_default);
   }
   return ts.factory.createCallExpression(
     ts.factory.createPropertyAccessExpression(
@@ -1144,9 +1171,9 @@ function createSetterBlock(
 
   const parameter: ts.Expression = field.isMap(fieldDescriptor)
     ? ts.factory.createAsExpression(
-        valueParameter,
-        ts.factory.createToken(ts.SyntaxKind.AnyKeyword),
-      )
+      valueParameter,
+      ts.factory.createToken(ts.SyntaxKind.AnyKeyword),
+    )
     : valueParameter;
 
   return ts.factory.createBlock(
@@ -1168,6 +1195,125 @@ function createSetterBlock(
     ],
     true,
   );
+}
+
+/**
+ * Returns a presence clear method for the field
+ */
+function createPresenceClear(
+  rootDescriptor: descriptor.FileDescriptorProto,
+  fieldDescriptor: descriptor.FieldDescriptorProto,
+  pbIdentifier: ts.Identifier,
+) {
+  if (!(rootDescriptor.syntax == "proto3") || field.isOptional(rootDescriptor, fieldDescriptor)) {
+    return ts.factory.createMethodDeclaration(
+      undefined,
+      undefined,
+      undefined,
+      "clear_" + fieldDescriptor.name,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      createPresenceClearBlock(fieldDescriptor, pbIdentifier),
+    );
+  }
+}
+
+function createPresenceClearBlock(
+  fieldDescriptor: descriptor.FieldDescriptorProto,
+  pbIdentifier: ts.Identifier,
+) {
+  let expression;
+  let repeatedExpression = field.isRepeated(fieldDescriptor)
+    ? ts.factory.createIdentifier("[]")
+    : ts.factory.createIdentifier("undefined");
+
+  if (field.isMessage(fieldDescriptor) && !field.isMap(fieldDescriptor)) {
+
+    expression = ts.factory.createAssignment(
+      ts.factory.createPropertyAccessExpression(
+        ts.factory.createThis(),
+        fieldDescriptor.name,
+      ),
+      repeatedExpression,
+    )
+  }
+
+  else {
+    expression = (
+      ts.factory.createCallExpression(
+        ts.factory.createPropertyAccessExpression(
+          ts.factory.createPropertyAccessExpression(pbIdentifier, "Message"),
+          "setField"
+        ),
+        undefined,
+        [
+          ts.factory.createThis(),
+          ts.factory.createNumericLiteral(fieldDescriptor.number),
+          repeatedExpression,
+        ],
+      )
+    );
+  }
+
+  return ts.factory.createBlock(
+    [
+      ts.factory.createExpressionStatement(
+        expression
+      ),
+    ],
+    true,
+  );
+}
+
+/**
+ * Returns a presence has method for the field
+ */
+function createPresenceHas(
+  fieldDescriptor: descriptor.FieldDescriptorProto,
+  pbIdentifier: ts.Identifier,
+) {
+  return ts.factory.createMethodDeclaration(
+    undefined,
+    undefined,
+    undefined,
+    "has_" + fieldDescriptor.name,
+    undefined,
+    undefined,
+    [],
+    undefined,
+    createPresenceHasBlock(fieldDescriptor, pbIdentifier),
+  );
+}
+
+function createPresenceHasBlock(
+  fieldDescriptor: descriptor.FieldDescriptorProto,
+  pbIdentifier: ts.Identifier,
+) {
+  return ts.factory.createBlock(
+    [
+      ts.factory.createReturnStatement(ts.factory.createBinaryExpression(
+        ts.factory.createCallExpression(
+          ts.factory.createPropertyAccessExpression(
+            ts.factory.createPropertyAccessExpression(
+              pbIdentifier,
+              ts.factory.createIdentifier("Message"),
+            ),
+            ts.factory.createIdentifier("getField"),
+          ),
+          undefined,
+          [
+            ts.factory.createThis(),
+            ts.factory.createNumericLiteral(fieldDescriptor.number),
+          ]
+        ),
+        ts.factory.createToken(ts.SyntaxKind.ExclamationEqualsToken),
+        ts.factory.createNull(),
+      )),
+    ],
+    true,
+  )
 }
 
 /**
@@ -1763,32 +1909,32 @@ function createDeserialize(
                 ts.factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken),
                 field.isRepeated(fieldDescriptor)
                   ? ts.factory.createCallExpression(
+                    ts.factory.createPropertyAccessExpression(
                       ts.factory.createPropertyAccessExpression(
-                        ts.factory.createPropertyAccessExpression(
-                          pbIdentifier,
-                          "Message",
-                        ),
-                        "addToRepeatedWrapperField",
+                        pbIdentifier,
+                        "Message",
                       ),
-                      undefined,
-                      [
-                        ts.factory.createIdentifier("message"),
-                        ts.factory.createNumericLiteral(fieldDescriptor.number),
-                        readCall,
-                        type.getTypeReferenceExpr(
-                          rootDescriptor,
-                          fieldDescriptor.type_name,
-                        ),
-                      ],
-                    )
-                  : ts.factory.createBinaryExpression(
-                      ts.factory.createPropertyAccessExpression(
-                        ts.factory.createIdentifier("message"),
-                        fieldDescriptor.name,
-                      ),
-                      ts.SyntaxKind.EqualsToken,
-                      readCall,
+                      "addToRepeatedWrapperField",
                     ),
+                    undefined,
+                    [
+                      ts.factory.createIdentifier("message"),
+                      ts.factory.createNumericLiteral(fieldDescriptor.number),
+                      readCall,
+                      type.getTypeReferenceExpr(
+                        rootDescriptor,
+                        fieldDescriptor.type_name,
+                      ),
+                    ],
+                  )
+                  : ts.factory.createBinaryExpression(
+                    ts.factory.createPropertyAccessExpression(
+                      ts.factory.createIdentifier("message"),
+                      fieldDescriptor.name,
+                    ),
+                    ts.SyntaxKind.EqualsToken,
+                    readCall,
+                  ),
               ),
             ],
           ),
@@ -2032,13 +2178,25 @@ function createMessage(
 
         // Create getter and setters
         ...messageDescriptor.field.flatMap((fieldDescriptor) => [
-          createGetter(rootDescriptor, fieldDescriptor, pbIdentifier),
+          createGetter(rootDescriptor, messageDescriptor, fieldDescriptor, pbIdentifier),
           createSetter(
             rootDescriptor,
             messageDescriptor,
             fieldDescriptor,
             pbIdentifier,
           ),
+          createPresenceClear(
+            rootDescriptor,
+            fieldDescriptor,
+            pbIdentifier,
+          ),
+          ...!field.isRepeated(fieldDescriptor)
+            || (rootDescriptor.syntax == "proto3" && field.isOptional(rootDescriptor, fieldDescriptor))
+            ? [createPresenceHas(
+              fieldDescriptor,
+              pbIdentifier,
+            )]
+            : []
         ]),
 
         // Create one of getters
