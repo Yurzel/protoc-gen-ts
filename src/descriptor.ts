@@ -286,6 +286,7 @@ function createFromObject(
 function createToObject(
   rootDescriptor: descriptor.FileDescriptorProto,
   messageDescriptor: descriptor.DescriptorProto,
+  pbIdentifier: ts.Identifier,
 ): ts.MethodDeclaration {
   const statements = [];
   const properties = [];
@@ -413,10 +414,24 @@ function createToObject(
         ts.factory.createThis(),
         fieldDescriptor.name,
       );
+
       let condition = ts.factory.createBinaryExpression(
-        propertyAccessor,
+        ts.factory.createCallExpression(
+          ts.factory.createPropertyAccessExpression(
+            ts.factory.createPropertyAccessExpression(
+              pbIdentifier,
+              ts.factory.createIdentifier("Message"),
+            ),
+            ts.factory.createIdentifier("getField"),
+          ),
+          undefined,
+          [
+            ts.factory.createThis(),
+            ts.factory.createNumericLiteral(fieldDescriptor.number),
+          ]
+        ),
         ts.factory.createToken(ts.SyntaxKind.ExclamationEqualsToken),
-        ts.factory.createNull(),
+        ts.factory.createNull()
       );
 
       if (field.isMap(fieldDescriptor)) {
@@ -2214,7 +2229,7 @@ function createMessage(
         createFromObject(rootDescriptor, messageDescriptor),
 
         // Create toObject method
-        createToObject(rootDescriptor, messageDescriptor),
+        createToObject(rootDescriptor, messageDescriptor, pbIdentifier),
 
         // Create serialize  method
         ...createSerialize(rootDescriptor, messageDescriptor, pbIdentifier),
